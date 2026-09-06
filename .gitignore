@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
-data/
+data/*
+!data/samples/
 *.duckdb
 .DS_Store
