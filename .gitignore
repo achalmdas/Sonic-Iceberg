@@ -6,3 +6,4 @@ data/*
 !data/samples/
 *.duckdb
 .DS_Store
+.cache

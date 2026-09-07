@@ -2,3 +2,4 @@ duckdb
 pandas
 spotipy
 python-dotenv
+requests
