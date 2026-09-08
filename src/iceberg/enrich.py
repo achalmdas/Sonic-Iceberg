@@ -102,7 +102,8 @@ def fetch_deezer_fans(name: str) -> int | None:
     return int((exact or hits)[0].get("nb_fan", 0)) or None
 
 
-def enrich(db: Path, refresh: bool = False) -> None:
+def enrich(db: Path, refresh: bool = False, progress=None) -> None:
+    """`progress(done, total)` is called after each artist, if given."""
     con = duckdb.connect(str(db))
     con.execute(CREATE_ARTISTS)
     if refresh:
@@ -139,6 +140,8 @@ def enrich(db: Path, refresh: bool = False) -> None:
             rows.append((name, None, None, None, [], fans, now))  # cache the miss too
         if i % 25 == 0:
             print(f"  {i}/{len(todo)}")
+        if progress:
+            progress(i, len(todo))
 
     con.executemany("INSERT INTO artists VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     print(f"Done. {len(rows) - len(misses)} enriched, {len(misses)} not found.")

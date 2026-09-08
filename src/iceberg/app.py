@@ -120,7 +120,7 @@ def run_pipeline(job: Path, title: str) -> None:
 
         write_status(job, "enriching", plays=n)
         warm_from_cache(db)
-        enrich.enrich(db)
+        enrich.enrich(db, progress=lambda done, total: write_status(job, "enriching", plays=n, done=done, total=total))
         store_to_cache(db)
 
         write_status(job, "analyzing", plays=n)
@@ -293,7 +293,9 @@ STATUS_PAGE = """
   async function poll() {
     const r = await fetch('/api/job/__JOB__'); const s = await r.json();
     document.getElementById('stage').textContent = labels[s.stage] || s.stage;
-    if (s.plays) document.getElementById('detail').textContent = s.plays.toLocaleString() + ' plays found.';
+    let detail = s.plays ? s.plays.toLocaleString() + ' plays found.' : '';
+    if (s.total) detail += ' ' + s.done + ' / ' + s.total + ' artists looked up.';
+    if (detail) document.getElementById('detail').textContent = detail;
     if (s.stage === 'done') { location.href = '/iceberg/__JOB__'; return; }
     if (s.stage === 'failed') { document.getElementById('detail').textContent = s.error || ''; return; }
     setTimeout(poll, 2000);
