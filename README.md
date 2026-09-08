@@ -9,3 +9,8 @@ Artist popularity comes from Last.fm listener counts, since Spotify removed popu
 
 ## Stack
 Python, DuckDB, pandas, Last.fm API
+
+## Usage
+pip install -r requirements.txt
+cp .env.example .env   # add your Last.fm key
+python run.py

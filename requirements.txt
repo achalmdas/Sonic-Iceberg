@@ -3,3 +3,6 @@ pandas
 spotipy
 python-dotenv
 requests
+fastapi
+uvicorn
+python-multipart

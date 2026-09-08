@@ -7,3 +7,5 @@ data/*
 *.duckdb
 .DS_Store
 .cache
+data/jobs/
+data/cache.duckdb
