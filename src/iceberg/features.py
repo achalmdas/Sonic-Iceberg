@@ -6,11 +6,13 @@ Builds three tables from `plays` and `artist_stats`:
   dropped_artists artists you once played heavily and then abandoned
   taste_depth     one row per month: plays-weighted obscurity over time
 
-Obscurity is derived from Last.fm global listener count on a log scale:
-    10,000,000 listeners -> 0   (the most mainstream)
-        10,000 listeners -> 100 (essentially unknown)
-Log scale matters because listener counts span several orders of magnitude;
-the gap between 50K and 500K is as meaningful as the gap between 500K and 5M.
+Obscurity (0-100) blends two sources on a log scale, then averages them:
+    Last.fm listeners: 10,000,000 -> 0,  10,000 -> 100
+    Deezer fans:       10,000,000 -> 0,   1,000 -> 100
+Log scale matters because counts span several orders of magnitude; the gap
+between 50K and 500K is as meaningful as the gap between 500K and 5M.
+Averaging two platforms softens each one's audience skew. If only one
+source knows the artist, that one is used alone.
 
 Usage:
     python src/iceberg/features.py
@@ -24,49 +26,55 @@ import duckdb
 
 DEFAULT_DB = Path("data/iceberg.duckdb")
 
-# Tier boundaries in listeners. Fixed thresholds (rather than percentiles)
-# mean two people's icebergs are comparable.
-TIERS = [
-    ("Surface",   3_000_000),   # >= 3M listeners
-    ("Shallows",  1_000_000),
-    ("Twilight",    300_000),
-    ("Midnight",    100_000),
-    ("Abyss",             0),
-]
+# Tier boundaries on the blended obscurity score. Fixed thresholds (rather
+# than percentiles) mean two people's icebergs are comparable.
+#   Surface  < 20   roughly 3M+ Last.fm listeners
+#   Shallows < 35   roughly 1M-3M
+#   Twilight < 55   roughly 300K-1M
+#   Midnight < 72   roughly 100K-300K
+#   Abyss    >= 72  under 100K
 
 CREATE_TIERS = """
 CREATE OR REPLACE TABLE iceberg_tiers AS
+WITH scored AS (
+    SELECT
+        s.*,
+        a.deezer_fans,
+        -- each source on its own log scale, clipped to [0, 100]; NULL if unknown
+        LEAST(100, GREATEST(0, (7 - LOG10(GREATEST(s.listeners, 1))) / 3 * 100))   AS lastfm_score,
+        LEAST(100, GREATEST(0, (7 - LOG10(GREATEST(a.deezer_fans, 1))) / 4 * 100)) AS deezer_score
+    FROM artist_stats s
+    LEFT JOIN artists a USING (artist_name)
+),
+blended AS (
+    SELECT *,
+        -- AVG over a list ignores NULLs, so a single-source artist still gets a score
+        ROUND(LIST_AVG([lastfm_score, deezer_score]), 1) AS obscurity
+    FROM scored
+)
 SELECT
-    artist_name,
-    plays,
-    hours,
-    listeners,
-    -- log10 scale: 1e7 -> 0, 1e4 -> 100, clipped to [0, 100]
-    ROUND(LEAST(100, GREATEST(0,
-        (7 - LOG10(GREATEST(listeners, 1))) / 3 * 100
-    )), 1)                                                    AS obscurity,
+    artist_name, plays, hours, listeners, deezer_fans,
+    ROUND(lastfm_score, 1) AS lastfm_score,
+    ROUND(deezer_score, 1) AS deezer_score,
+    obscurity,
     CASE
-        WHEN listeners IS NULL      THEN 'Unknown'
-        WHEN listeners >= 3000000   THEN 'Surface'
-        WHEN listeners >= 1000000   THEN 'Shallows'
-        WHEN listeners >= 300000    THEN 'Twilight'
-        WHEN listeners >= 100000    THEN 'Midnight'
-        ELSE                             'Abyss'
-    END                                                       AS tier,
+        WHEN obscurity IS NULL THEN 'Unknown'
+        WHEN obscurity < 20    THEN 'Surface'
+        WHEN obscurity < 35    THEN 'Shallows'
+        WHEN obscurity < 55    THEN 'Twilight'
+        WHEN obscurity < 72    THEN 'Midnight'
+        ELSE                        'Abyss'
+    END AS tier,
     CASE
-        WHEN listeners IS NULL      THEN 99
-        WHEN listeners >= 3000000   THEN 1
-        WHEN listeners >= 1000000   THEN 2
-        WHEN listeners >= 300000    THEN 3
-        WHEN listeners >= 100000    THEN 4
-        ELSE                             5
-    END                                                       AS tier_rank,
-    top_track,
-    tags,
-    first_played,
-    last_played,
-    days_since_last
-FROM artist_stats
+        WHEN obscurity IS NULL THEN 99
+        WHEN obscurity < 20    THEN 1
+        WHEN obscurity < 35    THEN 2
+        WHEN obscurity < 55    THEN 3
+        WHEN obscurity < 72    THEN 4
+        ELSE                        5
+    END AS tier_rank,
+    top_track, tags, first_played, last_played, days_since_last
+FROM blended
 ORDER BY tier_rank, plays DESC
 """
 

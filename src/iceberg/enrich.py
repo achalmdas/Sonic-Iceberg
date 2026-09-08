@@ -1,9 +1,12 @@
-"""Enrich artists in the plays table with global listener counts and tags.
+"""Enrich artists in the plays table with popularity from two sources.
 
-Uses the Last.fm `artist.getInfo` endpoint, which returns how many people
-worldwide have listened to an artist, total global plays, and community
-tags (effectively genres). Global listener count is the project's
-"mainstream vs obscure" axis.
+  Last.fm `artist.getInfo`  -> listeners, playcount, community tags (genres)
+  Deezer  `search/artist`   -> fan count (no API key needed)
+
+Two independent sources are used because each platform has its own
+audience skew (Last.fm leans rock and older listeners; Deezer leans
+European). features.py averages their log-scaled counts so one platform's
+blind spot doesn't decide an artist's tier.
 
 Why not Spotify? In February 2026 Spotify removed the `popularity` and
 `followers` fields from artist objects for development-mode apps, so there
@@ -16,7 +19,7 @@ Requires LASTFM_API_KEY in a .env file (free at last.fm/api/account/create).
 
 Usage:
     python src/iceberg/enrich.py
-    python src/iceberg/enrich.py --refresh      # re-fetch everything
+    python src/iceberg/enrich.py --refresh      # re-fetch everything (needed once after adding Deezer)
 """
 
 import argparse
@@ -31,15 +34,17 @@ from dotenv import load_dotenv
 
 DEFAULT_DB = Path("data/iceberg.duckdb")
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
-REQUEST_DELAY = 0.25  # Last.fm asks for <= ~5 requests/second
+DEEZER_URL = "https://api.deezer.com/search/artist"
+REQUEST_DELAY = 0.25  # both APIs are happy at ~4 requests/second
 
 CREATE_ARTISTS = """
 CREATE TABLE IF NOT EXISTS artists (
     artist_name     VARCHAR PRIMARY KEY,   -- matches plays.artist_name
     lastfm_name     VARCHAR,               -- Last.fm's canonical spelling
-    listeners       BIGINT,                -- global unique listeners
-    playcount       BIGINT,                -- global total plays
-    tags            VARCHAR[],             -- top community tags (genres)
+    listeners       BIGINT,                -- Last.fm unique listeners
+    playcount       BIGINT,                -- Last.fm total plays
+    tags            VARCHAR[],             -- Last.fm community tags (genres)
+    deezer_fans     BIGINT,                -- Deezer fan count
     fetched_at      TIMESTAMP
 )
 """
@@ -82,6 +87,21 @@ def fetch_artist(name: str, api_key: str) -> dict | None:
     }
 
 
+def fetch_deezer_fans(name: str) -> int | None:
+    """Top Deezer search hit's fan count, or None. Case-insensitive exact name match preferred."""
+    try:
+        resp = requests.get(DEEZER_URL, params={"q": name, "limit": 5}, timeout=10)
+        resp.raise_for_status()
+        hits = resp.json().get("data", [])
+    except (requests.RequestException, ValueError) as exc:
+        print(f"  deezer failed for {name!r}: {exc}")
+        return None
+    if not hits:
+        return None
+    exact = [h for h in hits if h.get("name", "").lower() == name.lower()]
+    return int((exact or hits)[0].get("nb_fan", 0)) or None
+
+
 def enrich(db: Path, refresh: bool = False) -> None:
     con = duckdb.connect(str(db))
     con.execute(CREATE_ARTISTS)
@@ -108,24 +128,26 @@ def enrich(db: Path, refresh: bool = False) -> None:
 
     for i, name in enumerate(todo, 1):
         info = fetch_artist(name, api_key)
+        time.sleep(REQUEST_DELAY)
+        fans = fetch_deezer_fans(name)
+        time.sleep(REQUEST_DELAY)
         if info:
             rows.append((name, info["lastfm_name"], info["listeners"],
-                         info["playcount"], info["tags"], now))
+                         info["playcount"], info["tags"], fans, now))
         else:
             misses.append(name)
-            rows.append((name, None, None, None, [], now))  # cache the miss too
+            rows.append((name, None, None, None, [], fans, now))  # cache the miss too
         if i % 25 == 0:
             print(f"  {i}/{len(todo)}")
-        time.sleep(REQUEST_DELAY)
 
-    con.executemany("INSERT INTO artists VALUES (?, ?, ?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO artists VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     print(f"Done. {len(rows) - len(misses)} enriched, {len(misses)} not found.")
     if misses:
         print("  Not found:", ", ".join(misses[:10]), "..." if len(misses) > 10 else "")
 
-    print("\nMost to least mainstream:")
+    print("\nMost to least mainstream (Last.fm listeners / Deezer fans):")
     con.sql("""
-        SELECT artist_name, listeners, tags[1:3] AS top_tags
+        SELECT artist_name, listeners, deezer_fans, tags[1:3] AS top_tags
         FROM artists WHERE listeners IS NOT NULL
         ORDER BY listeners DESC
     """).show(max_rows=30)
