@@ -18,7 +18,8 @@ def client(tmp_path, export_dir, monkeypatch):
     from iceberg import enrich
     con = duckdb.connect(str(tmp_path / "cache.duckdb"))
     con.execute(enrich.CREATE_ARTISTS)
-    con.executemany("INSERT INTO artists VALUES (?, ?, ?, ?, ?, ?, NULL)",
+    con.executemany("INSERT INTO artists (artist_name, lastfm_name, listeners, playcount, tags, deezer_fans) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [(n, n, l, l * 20, ["tag"], int(l * 0.8)) for n, l in LISTENERS.items()])
     con.close()
 

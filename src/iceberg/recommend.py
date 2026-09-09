@@ -84,10 +84,11 @@ def lastfm(method: str, api_key: str, **params) -> dict | None:
 
 def top_genres(con, n: int) -> list[str]:
     """Tags weighted by hours listened, skipping junk tags."""
+    # Last.fm tags are user-typed: "Hip-Hop", "hip hop" and "hip-hop" are one genre.
     rows = con.execute("""
-        SELECT tag, SUM(hours) AS weighted_hours
+        SELECT REPLACE(LOWER(tag), '-', ' ') AS tag, SUM(hours) AS weighted_hours
         FROM (SELECT UNNEST(tags[1:5]) AS tag, hours FROM iceberg_tiers WHERE tags IS NOT NULL)
-        GROUP BY tag ORDER BY weighted_hours DESC LIMIT 40
+        GROUP BY 1 ORDER BY weighted_hours DESC LIMIT 40
     """).fetchall()
     out = []
     for tag, _ in rows:
@@ -102,7 +103,8 @@ def seeds_for(con, genre: str, n: int) -> list[str]:
     """Your most obscure artists that carry this tag."""
     return [r[0] for r in con.execute("""
         SELECT artist_name FROM iceberg_tiers
-        WHERE list_contains(tags, ?) AND obscurity IS NOT NULL
+        WHERE list_contains(list_transform(tags, t -> REPLACE(LOWER(t), '-', ' ')), ?)
+          AND obscurity IS NOT NULL
         ORDER BY obscurity DESC, hours DESC LIMIT ?
     """, [genre, n]).fetchall()]
 

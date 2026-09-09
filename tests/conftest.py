@@ -55,7 +55,8 @@ def db(tmp_path_factory, export_dir) -> Path:
     ingest.ingest(export_dir, path)
     con = duckdb.connect(str(path))
     con.execute(enrich.CREATE_ARTISTS)
-    con.executemany("INSERT INTO artists VALUES (?, ?, ?, ?, ?, ?, NULL)",
+    con.executemany("INSERT INTO artists (artist_name, lastfm_name, listeners, playcount, tags, deezer_fans) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [(n, n, l, l * 20, ["tag"], int(l * 0.8)) for n, l in LISTENERS.items()])
     con.close()
     stats.build(path)

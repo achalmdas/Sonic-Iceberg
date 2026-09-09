@@ -6,13 +6,18 @@ Builds three tables from `plays` and `artist_stats`:
   dropped_artists artists you once played heavily and then abandoned
   taste_depth     one row per month: plays-weighted obscurity over time
 
-Obscurity (0-100) blends two sources on a log scale, then averages them:
-    Last.fm listeners: 10,000,000 -> 0,  10,000 -> 100
-    Deezer fans:       10,000,000 -> 0,   1,000 -> 100
+Obscurity (0-100) puts two sources on a log scale, then blends them:
+    Last.fm listeners: 10,000,000 -> 0,  10,000 -> 100   (weight 0.75)
+    Deezer fans:       10,000,000 -> 0,   1,000 -> 100   (weight 0.25)
 Log scale matters because counts span several orders of magnitude; the gap
 between 50K and 500K is as meaningful as the gap between 500K and 5M.
-Averaging two platforms softens each one's audience skew. If only one
-source knows the artist, that one is used alone.
+
+Last.fm carries most of the weight: its listener counts are a broad, well
+graded signal. Deezer's "fans" (favourites) are very top-heavy: huge for a
+few superstars, then a cliff, so they mostly help confirm who is Surface.
+When the two scores disagree by more than 45 points one of them matched
+the wrong artist, and Deezer is dropped. If only one source knows the
+artist, that one is used alone.
 
 Usage:
     python src/iceberg/features.py
@@ -41,15 +46,24 @@ WITH scored AS (
         s.*,
         a.deezer_fans,
         -- each source on its own log scale, clipped to [0, 100]; NULL if unknown
-        LEAST(100, GREATEST(0, (7 - LOG10(GREATEST(s.listeners, 1))) / 3 * 100))   AS lastfm_score,
-        LEAST(100, GREATEST(0, (7 - LOG10(GREATEST(a.deezer_fans, 1))) / 4 * 100)) AS deezer_score
+        CASE WHEN s.listeners IS NULL OR s.listeners < 1 THEN NULL
+             ELSE LEAST(100, GREATEST(0, (7 - LOG10(s.listeners)) / 3 * 100)) END      AS lastfm_score,
+        CASE WHEN a.deezer_fans IS NULL OR a.deezer_fans < 1 THEN NULL
+             ELSE LEAST(100, GREATEST(0, (7 - LOG10(a.deezer_fans)) / 4 * 100)) END    AS deezer_score
     FROM artist_stats s
     LEFT JOIN artists a USING (artist_name)
 ),
 blended AS (
     SELECT *,
-        -- AVG over a list ignores NULLs, so a single-source artist still gets a score
-        ROUND(LIST_AVG([lastfm_score, deezer_score]), 1) AS obscurity
+        ROUND(CASE
+            -- both known and roughly agree: weighted blend
+            WHEN lastfm_score IS NOT NULL AND deezer_score IS NOT NULL
+                 AND ABS(lastfm_score - deezer_score) <= 45
+                THEN 0.75 * lastfm_score + 0.25 * deezer_score
+            -- wild disagreement = one source matched the wrong artist; trust Last.fm
+            WHEN lastfm_score IS NOT NULL THEN lastfm_score
+            ELSE deezer_score
+        END, 1) AS obscurity
     FROM scored
 )
 SELECT
@@ -73,7 +87,7 @@ SELECT
         WHEN obscurity < 72    THEN 4
         ELSE                        5
     END AS tier_rank,
-    top_track, tags, first_played, last_played, days_since_last
+    top_track, top_track_id, spotify_id, image_url, tags, first_played, last_played, days_since_last
 FROM blended
 ORDER BY tier_rank, plays DESC
 """

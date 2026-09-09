@@ -31,7 +31,7 @@ from iceberg import enrich, features, ingest, recommend, render, stats  # noqa: 
 # older shape (e.g. before deezer_fans was added), it's dropped and rebuilt
 # instead of crashing the run.
 EXPECTED_COLUMNS = {
-    "artists": {"deezer_fans"},
+    "artists": {"deezer_fans", "spotify_id", "image_url"},
     "candidate_cache": {"canonical"},
 }
 
@@ -66,6 +66,8 @@ def main() -> None:
     parser.add_argument("--title", default="Your music iceberg")
     parser.add_argument("--fresh", action="store_true", help="delete the database before running")
     parser.add_argument("--skip-recs", action="store_true", help="skip recommendation lookups")
+    parser.add_argument("--min-plays", type=int, default=3,
+                        help="only look up artists with at least this many plays")
     parser.add_argument("--churn-plays", type=int, default=20)
     parser.add_argument("--churn-gap", type=int, default=180)
     args = parser.parse_args()
@@ -81,7 +83,7 @@ def main() -> None:
     done()
 
     done = step("enrich")
-    enrich.enrich(args.db)
+    enrich.enrich(args.db, min_plays=args.min_plays)
     done()
 
     done = step("stats")

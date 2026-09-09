@@ -41,13 +41,14 @@ ranked_tracks AS (
     SELECT
         artist_name,
         track_name,
+        ANY_VALUE(track_id) AS track_id,
         COUNT(*) AS track_plays,
         ROW_NUMBER() OVER (PARTITION BY artist_name ORDER BY COUNT(*) DESC, track_name) AS rn
     FROM plays
     GROUP BY artist_name, track_name
 ),
 top_tracks AS (
-    SELECT artist_name, track_name AS top_track, track_plays AS top_track_plays
+    SELECT artist_name, track_name AS top_track, track_id AS top_track_id, track_plays AS top_track_plays
     FROM ranked_tracks
     WHERE rn = 1
 ),
@@ -67,8 +68,11 @@ SELECT
     DATE_DIFF('day', t.last_played, d.end_ts)        AS days_since_last,
     DATE_DIFF('day', t.first_played, t.last_played)  AS days_active,
     tt.top_track,
+    tt.top_track_id,
     tt.top_track_plays,
     a.listeners,
+    a.spotify_id,
+    a.image_url,
     a.playcount                                      AS global_playcount,
     a.tags
 FROM totals t

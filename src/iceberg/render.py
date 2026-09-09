@@ -104,7 +104,7 @@ def load_data(db: Path) -> dict:
 
     tiers = rows("""
         SELECT artist_name, plays, hours, listeners, deezer_fans, obscurity, tier, tier_rank,
-               top_track, tags, first_played, last_played, days_since_last
+               top_track, top_track_id, spotify_id, image_url, tags, first_played, last_played, days_since_last
         FROM iceberg_tiers WHERE tier != 'Unknown' ORDER BY tier_rank, hours DESC
     """)
     dropped = rows("""
@@ -123,12 +123,13 @@ def load_data(db: Path) -> dict:
             FROM plays GROUP BY 1, 2
         ),
         ranked AS (
-            SELECT YEAR(played_at) AS yr, artist_name, track_name, COUNT(*) AS n,
+            SELECT YEAR(played_at) AS yr, artist_name, track_name, ANY_VALUE(track_id) AS track_id, COUNT(*) AS n,
                    ROW_NUMBER() OVER (PARTITION BY YEAR(played_at), artist_name ORDER BY COUNT(*) DESC, track_name) AS rn
             FROM plays GROUP BY 1, 2, 3
         )
         SELECT y.yr, y.artist_name, y.plays, y.hours, y.first_played, y.last_played,
-               r.track_name AS top_track, t.listeners, t.deezer_fans, t.obscurity, t.tier, t.tier_rank, t.tags
+               r.track_name AS top_track, r.track_id AS top_track_id, t.spotify_id, t.image_url,
+               t.listeners, t.deezer_fans, t.obscurity, t.tier, t.tier_rank, t.tags
         FROM yearly y
         JOIN ranked r ON r.yr = y.yr AND r.artist_name = y.artist_name AND r.rn = 1
         JOIN iceberg_tiers t ON t.artist_name = y.artist_name
@@ -222,6 +223,7 @@ TEMPLATE = r"""<!doctype html>
   .artist { background: none; border: 0; font: inherit; color: inherit; cursor: pointer; padding: 0.1rem 0.2rem;
             border-bottom: 1px solid transparent; }
   .artist:hover, .artist:focus-visible { border-bottom-color: currentColor; outline: none; }
+  .artist.pinned { border-bottom: 2px solid currentColor; }
   .artist.dropped { color: var(--amber); }
   .above .artist.dropped { color: #A8641A; }
   .empty { opacity: 0.5; font-style: italic; }
@@ -231,7 +233,13 @@ TEMPLATE = r"""<!doctype html>
            background: var(--ice); color: var(--ink); padding: 1.1rem 1.25rem; border-radius: 4px;
            box-shadow: 0 8px 30px rgba(6,17,31,0.35); display: none; font-size: 0.95rem; }
   #panel.open { display: block; }
+  #panel.pinned { box-shadow: 0 8px 30px rgba(6,17,31,0.35), 0 0 0 2px var(--ink); }
+  #panel .hint { font-size: 0.8rem; opacity: 0.5; margin-top: 0.6rem; }
   #panel h3 { margin: 0 0 0.3rem; font-weight: 400; font-size: 1.3rem; }
+  #panel .head { display: flex; gap: 0.9rem; align-items: center; }
+  #panel .head img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; flex: none; }
+  #panel a { color: inherit; }
+  #panel .links { margin-top: 0.7rem; font-size: 0.9rem; display: flex; gap: 1rem; }
   #panel dl { margin: 0.6rem 0 0; display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.8rem; }
   #panel dt { opacity: 0.6; } #panel dd { margin: 0; }
   #panel .tags { margin-top: 0.6rem; font-size: 0.85rem; opacity: 0.75; }
@@ -256,6 +264,7 @@ TEMPLATE = r"""<!doctype html>
   .recs ol { list-style: none; margin: 0; padding: 0; }
   .recs li { padding: 0.45rem 0; }
   .recs li small { display: block; opacity: 0.55; }
+  .recs li a { color: inherit; text-decoration: none; border-bottom: 1px solid rgba(220,233,242,0.35); }
   footer { font-size: 0.85rem; opacity: 0.5; margin-top: 3rem; }
 </style>
 </head>
@@ -293,10 +302,12 @@ TEMPLATE = r"""<!doctype html>
 
 <aside id="panel" aria-live="polite">
   <button class="close" aria-label="Close">×</button>
-  <h3></h3>
+  <div class="head"><img alt="" hidden><h3></h3></div>
   <dl></dl>
   <div class="tags"></div>
   <div class="note"></div>
+  <div class="links"></div>
+  <div class="hint">Click an artist to pin this panel. Esc to close.</div>
 </aside>
 
 <script id="data" type="application/json">__DATA__</script>
@@ -360,7 +371,7 @@ TEMPLATE = r"""<!doctype html>
     const b = e.target.closest('button'); if (!b) return;
     yearsEl.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
     renderBerg(b.dataset.year === 'all' ? D.tiers : D.years[b.dataset.year]);
-    panel.classList.remove('open');
+    closePanel();
   });
   renderBerg(D.tiers);
 
@@ -369,6 +380,13 @@ TEMPLATE = r"""<!doctype html>
   function show(name) {
     const a = byName[name]; if (!a) return;
     panel.querySelector('h3').textContent = a.artist_name;
+    const img = panel.querySelector('img');
+    if (a.image_url) { img.src = a.image_url; img.hidden = false; } else { img.hidden = true; img.removeAttribute('src'); }
+    const trackUrl = a.top_track_id ? `https://open.spotify.com/track/${a.top_track_id}` : null;
+    const artistUrl = a.spotify_id ? `https://open.spotify.com/artist/${a.spotify_id}` : null;
+    panel.querySelector('.links').innerHTML =
+      (artistUrl ? `<a href="${artistUrl}" target="_blank" rel="noopener">Open artist on Spotify</a>` : '') +
+      (trackUrl ? `<a href="${trackUrl}" target="_blank" rel="noopener">Play top track</a>` : '');
     panel.querySelector('dl').innerHTML = [
       ['plays', fmt(a.plays)], ['hours', a.hours],
       ['top track', a.top_track],
@@ -382,9 +400,28 @@ TEMPLATE = r"""<!doctype html>
       ? `Dropped: ${fmt(d.peak_3mo_plays)} plays around ${d.peak_month}, then silence.` : '';
     panel.classList.add('open');
   }
-  berg.addEventListener('mouseover', e => { const b = e.target.closest('.artist'); if (b) show(b.dataset.name); });
-  berg.addEventListener('focusin',  e => { const b = e.target.closest('.artist'); if (b) show(b.dataset.name); });
-  panel.querySelector('.close').addEventListener('click', () => panel.classList.remove('open'));
+  // Hover previews; click pins. While pinned, hovering other artists doesn't
+  // steal the panel, so you can move the mouse over to read it or click a link.
+  let pinned = null;
+  function setPinned(name) {
+    pinned = name;
+    berg.querySelectorAll('.artist.pinned').forEach(b => b.classList.remove('pinned'));
+    if (name) {
+      const b = berg.querySelector(`.artist[data-name="${CSS.escape(name)}"]`);
+      if (b) b.classList.add('pinned');
+    }
+    panel.classList.toggle('pinned', !!name);
+  }
+  berg.addEventListener('mouseover', e => { const b = e.target.closest('.artist'); if (b && !pinned) show(b.dataset.name); });
+  berg.addEventListener('focusin',  e => { const b = e.target.closest('.artist'); if (b && !pinned) show(b.dataset.name); });
+  berg.addEventListener('click', e => {
+    const b = e.target.closest('.artist'); if (!b) return;
+    if (pinned === b.dataset.name) { setPinned(null); return; }   // click again to unpin
+    show(b.dataset.name); setPinned(b.dataset.name);
+  });
+  function closePanel() { setPinned(null); panel.classList.remove('open'); }
+  panel.querySelector('.close').addEventListener('click', closePanel);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
 
   // deepest cut
   if (D.deepest) {
@@ -399,7 +436,7 @@ TEMPLATE = r"""<!doctype html>
     D.recs.forEach(r => (byGenre[r.genre] = byGenre[r.genre] || []).push(r));
     document.getElementById('recs').innerHTML = Object.entries(byGenre).map(([g, list]) =>
       `<div><h3>${g}</h3><ol>` + list.map(r =>
-        `<li>${r.artist_name}<small>${fmt(r.listeners)} listeners · like ${r.similar_to.slice(0, 2).join(', ')}</small></li>`
+        `<li><a href="https://open.spotify.com/search/${encodeURIComponent(r.artist_name)}" target="_blank" rel="noopener">${r.artist_name}</a><small>${fmt(r.listeners)} listeners · like ${r.similar_to.slice(0, 2).join(', ')}</small></li>`
       ).join('') + `</ol></div>`).join('');
   } else {
     document.getElementById('recs-block').style.display = 'none';
@@ -423,7 +460,20 @@ TEMPLATE = r"""<!doctype html>
     const y = v => T + (H - T - B) * ((v - yMin) / (yMax - yMin));
     const line = pts.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.depth_score).toFixed(1)).join(' ');
     const area = `M${L} ${T} ` + line.slice(1) + ` L${x(pts.length - 1).toFixed(1)} ${T} Z`;
-    const years = pts.map((p, i) => ({ i, yr: p.month.slice(0, 4) })).filter((p, i, arr) => i === 0 || p.yr !== arr[i - 1].yr);
+    // One label per year, but never two labels within 40px of each other: a
+    // history that starts in December would otherwise print two years on top
+    // of each other, and a 15-year history would print an unreadable row.
+    const monthsIn = {};
+    pts.forEach(p => { const yr = p.month.slice(0, 4); monthsIn[yr] = (monthsIn[yr] || 0) + 1; });
+    const years = [];
+    let lastX = -Infinity;
+    pts.forEach((p, i) => {
+      const yr = p.month.slice(0, 4);
+      if (i > 0 && yr === pts[i - 1].month.slice(0, 4)) return;   // first month of the year only
+      if (monthsIn[yr] < 6 && Object.keys(monthsIn).length > 1) return;   // a stub year (Dec-only start) gets no label
+      if (x(i) - lastX < 40) return;                                  // never overlap on long histories
+      years.push({ i, yr }); lastX = x(i);
+    });
     svg.innerHTML =
       `<defs><linearGradient id="seafill" x1="0" y1="0" x2="0" y2="1">
          <stop offset="0" stop-color="#5FA8D3"/><stop offset="0.5" stop-color="#1F5F8B"/><stop offset="1" stop-color="#0F2E4F"/>

@@ -44,3 +44,21 @@ def test_stats_top_track_is_the_most_played(con):
         GROUP BY track_name ORDER BY COUNT(*) DESC, track_name LIMIT 1
     """, [artist]).fetchone()[0]
     assert top == best
+
+
+def test_unknown_artists_are_not_scored(db, tmp_path):
+    """An artist neither source knows must land in 'Unknown', not 'Abyss'.
+    Works on a copy so the shared session database stays untouched."""
+    import shutil
+    import duckdb
+    from iceberg import features, stats
+    db = shutil.copy(db, tmp_path / "copy.duckdb")
+    con = duckdb.connect(str(db))
+    con.execute("INSERT INTO plays SELECT * REPLACE ('Nobody Knows Me' AS artist_name) FROM plays LIMIT 30")
+    con.close()
+    stats.build(db)
+    features.build(db, churn_plays=20, churn_gap=180)
+    con = duckdb.connect(str(db), read_only=True)
+    tier, obs = con.execute("SELECT tier, obscurity FROM iceberg_tiers WHERE artist_name = 'Nobody Knows Me'").fetchone()
+    con.close()
+    assert tier == "Unknown" and obs is None

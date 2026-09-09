@@ -54,8 +54,12 @@ def job_dir(job_id: str) -> Path:
 
 
 def write_status(job: Path, stage: str, **extra) -> None:
+    """Atomic write: the poller can never see a half-written file, because the
+    file only appears under its final name once the rename completes."""
     payload = {"stage": stage, "updated": datetime.now(timezone.utc).isoformat(), **extra}
-    (job / "status.json").write_text(json.dumps(payload))
+    tmp = job / "status.json.tmp"
+    tmp.write_text(json.dumps(payload))
+    os.replace(tmp, job / "status.json")
 
 
 def read_status(job: Path) -> dict:
@@ -63,15 +67,39 @@ def read_status(job: Path) -> dict:
         return json.loads((job / "status.json").read_text())
     except FileNotFoundError:
         raise HTTPException(404)
+    except json.JSONDecodeError:
+        return {"stage": "working"}   # caught mid-write on an old file; the next poll will be fine
 
 
 # --------------------------------------------------------------------------
 # Shared artist cache
 # --------------------------------------------------------------------------
+# Columns each cache table must have. A table with an older shape (from a
+# previous version of the code) is dropped and rebuilt rather than crashing.
+EXPECTED_COLUMNS = {
+    "artists": {"deezer_fans", "spotify_id", "image_url"},
+    "candidate_cache": {"canonical"},
+}
+
+
+def ensure_cache_schema() -> None:
+    if not CACHE_DB.exists():
+        return
+    con = duckdb.connect(str(CACHE_DB))
+    for table, required in EXPECTED_COLUMNS.items():
+        cols = {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()}
+        if cols and not required <= cols:
+            print(f"  shared cache: {table} has an outdated schema, rebuilding it")
+            con.execute(f"DROP TABLE {table}")
+    con.close()
+
+
 def warm_from_cache(db: Path) -> None:
     """Copy already-known artists from the shared cache into this job's DB."""
     if not CACHE_DB.exists():
         return
+    ensure_cache_schema()
     con = duckdb.connect(str(db))
     con.execute(f"ATTACH '{CACHE_DB}' AS cache (READ_ONLY)")
     con.execute(enrich.CREATE_ARTISTS)
@@ -94,6 +122,7 @@ def _has_table(con, schema_db: str, table: str) -> bool:
 
 def store_to_cache(db: Path) -> None:
     """Merge this job's lookups back into the shared cache."""
+    ensure_cache_schema()
     con = duckdb.connect(str(CACHE_DB))
     con.execute(enrich.CREATE_ARTISTS)
     con.execute(recommend.CREATE_CACHE)
@@ -120,7 +149,8 @@ def run_pipeline(job: Path, title: str) -> None:
 
         write_status(job, "enriching", plays=n)
         warm_from_cache(db)
-        enrich.enrich(db, progress=lambda done, total: write_status(job, "enriching", plays=n, done=done, total=total))
+        enrich.enrich(db, min_plays=3,
+                      progress=lambda done, total: write_status(job, "enriching", plays=n, done=done, total=total))
         store_to_cache(db)
 
         write_status(job, "analyzing", plays=n)
@@ -275,9 +305,10 @@ UPLOAD_FORM = """
 <p style="margin-top:1.5rem"><a href="/demo">Or see a demo built from sample data</a></p>
 <details><summary>How do I get my export?</summary>
 <ol>
-  <li>Go to spotify.com/account/privacy</li>
-  <li>Under "Download your data", tick <b>Extended streaming history</b> and request it</li>
-  <li>Spotify emails a zip in 3–14 days. Upload that zip here as-is.</li>
+  <li>Go to <b>spotify.com/account/privacy</b> (log in on the web, not the app)</li>
+  <li>Under "Download your data", tick <b>Extended streaming history</b> — not the basic "Account data" — and request it</li>
+  <li><b>Check your email right away.</b> Spotify sends a confirmation link, and the request doesn't start until you click it. No click, no export.</li>
+  <li>3–14 days later Spotify emails a download link. Upload that zip here exactly as you received it — don't unzip it.</li>
 </ol>
 <p class="muted">Your export is processed and deleted; only the finished page and anonymous artist lookups are kept.</p>
 </details>"""
@@ -290,8 +321,17 @@ STATUS_PAGE = """
   const labels = { queued:'Queued…', ingesting:'Reading your history…', enriching:'Looking up artists…',
                    analyzing:'Finding tiers, dropped artists, and taste depth…', recommending:'Finding things worth diving for…',
                    rendering:'Drawing the iceberg…', done:'Done. Opening…', failed:'Something went wrong.' };
+  let misses = 0;
   async function poll() {
-    const r = await fetch('/api/job/__JOB__'); const s = await r.json();
+    let s;
+    try {
+      const r = await fetch('/api/job/__JOB__');
+      if (!r.ok) throw new Error(r.status);
+      s = await r.json(); misses = 0;
+    } catch (e) {
+      if (++misses > 30) { document.getElementById('detail').textContent = 'Lost contact with the server.'; return; }
+      setTimeout(poll, 2000); return;     // transient; try again
+    }
     document.getElementById('stage').textContent = labels[s.stage] || s.stage;
     let detail = s.plays ? s.plays.toLocaleString() + ' plays found.' : '';
     if (s.total) detail += ' ' + s.done + ' / ' + s.total + ' artists looked up.';
